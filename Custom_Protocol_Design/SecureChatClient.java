@@ -5,12 +5,13 @@ import javax.net.ssl.*;
 
 /**
  * SecureChatClient
- * - Connects to SecureChatServer using TLS.
- * - Uses ChatMessage for protocol.
- * - Console commands:
- *   /login <name>
- *   /msg <text>
- *   /quit
+ * - Connects to SecureChatServer over TLS.
+ * - Supports commands:
+ *   /login <name>        : login
+ *   /join <room>         : join or create a room
+ *   /msg <text>          : send message to current room
+ *   /pm <user> <text>    : send private message
+ *   /quit                : exit
  */
 public class SecureChatClient {
 
@@ -22,6 +23,8 @@ public class SecureChatClient {
     private DataInputStream in;
     private DataOutputStream out;
     private volatile boolean running = true;
+
+    private String currentRoom = null;
 
     public SecureChatClient(String host, int port, boolean trustAll) {
         this.host = host;
@@ -52,13 +55,7 @@ public class SecureChatClient {
     }
 
     public void connect() throws Exception {
-        SSLContext ctx;
-        if (trustAll) {
-            ctx = createTrustAllContext();
-        } else {
-            ctx = SSLContext.getDefault();
-        }
-
+        SSLContext ctx = trustAll ? createTrustAllContext() : SSLContext.getDefault();
         SSLSocketFactory factory = ctx.getSocketFactory();
         socket = (SSLSocket) factory.createSocket(host, port);
         socket.startHandshake();
@@ -67,7 +64,7 @@ public class SecureChatClient {
         out = new DataOutputStream(socket.getOutputStream());
 
         System.out.println("Connected to server: " + host + ":" + port);
-        System.out.println("You should /login <name> first.");
+        System.out.println("Use /login <name> first.");
     }
 
     public void startConsole() throws IOException {
@@ -79,9 +76,11 @@ public class SecureChatClient {
                 new BufferedReader(new InputStreamReader(System.in));
 
         System.out.println("Commands:");
-        System.out.println("  /login <name>   - log in with a username");
-        System.out.println("  /msg <text>     - send message to everyone");
-        System.out.println("  /quit           - exit");
+        System.out.println("  /login <name>        - log in with a username");
+        System.out.println("  /join <room>         - join or create a room");
+        System.out.println("  /msg <text>          - send message to current room");
+        System.out.println("  /pm <user> <text>    - send private message");
+        System.out.println("  /quit                - exit");
 
         while (running) {
             String line = console.readLine();
@@ -100,7 +99,17 @@ public class SecureChatClient {
                     continue;
                 }
                 ChatMessage msg = new ChatMessage(MessageType.LOGIN_REQUEST);
-                msg.setContent(username); // server uses content as requested username
+                msg.setContent(username);
+                msg.writeTo(out);
+
+            } else if (line.startsWith("/join ")) {
+                String room = line.substring(6).trim();
+                if (room.isEmpty()) {
+                    System.out.println("Room name cannot be empty.");
+                    continue;
+                }
+                ChatMessage msg = new ChatMessage(MessageType.JOIN_ROOM_REQUEST);
+                msg.setRoom(room);
                 msg.writeTo(out);
 
             } else if (line.startsWith("/msg ")) {
@@ -109,6 +118,28 @@ public class SecureChatClient {
                     continue;
                 }
                 ChatMessage msg = new ChatMessage(MessageType.TEXT_MESSAGE);
+                msg.setContent(text);
+                if (currentRoom != null) {
+                    msg.setRoom(currentRoom);
+                }
+                msg.writeTo(out);
+
+            } else if (line.startsWith("/pm ")) {
+                // /pm <user> <text>
+                String rest = line.substring(4).trim();
+                int space = rest.indexOf(' ');
+                if (space <= 0) {
+                    System.out.println("Usage: /pm <user> <text>");
+                    continue;
+                }
+                String targetUser = rest.substring(0, space).trim();
+                String text = rest.substring(space + 1).trim();
+                if (targetUser.isEmpty() || text.isEmpty()) {
+                    System.out.println("Usage: /pm <user> <text>");
+                    continue;
+                }
+                ChatMessage msg = new ChatMessage(MessageType.PRIVATE_MESSAGE);
+                msg.setRecipient(targetUser);
                 msg.setContent(text);
                 msg.writeTo(out);
 
@@ -121,7 +152,7 @@ public class SecureChatClient {
                 break;
 
             } else {
-                System.out.println("Unknown command. Use /login, /msg or /quit.");
+                System.out.println("Unknown command. Use /login, /join, /msg, /pm or /quit.");
             }
         }
     }
@@ -150,12 +181,26 @@ public class SecureChatClient {
             case LOGIN_RESPONSE:
                 System.out.println("[LOGIN] " + msg.getContent());
                 break;
-            case TEXT_MESSAGE:
-                String from = msg.getSender();
-                if (from == null) {
-                    from = "UNKNOWN";
+            case JOIN_ROOM_RESPONSE:
+                if ("OK".equals(msg.getContent())) {
+                    currentRoom = msg.getRoom();
+                    System.out.println("[ROOM] joined room: " + currentRoom);
+                } else {
+                    System.out.println("[ROOM] join failed: " + msg.getContent());
                 }
-                System.out.println("[" + from + "]: " + msg.getContent());
+                break;
+            case TEXT_MESSAGE:
+                String room = msg.getRoom();
+                String sender = msg.getSender() != null ? msg.getSender() : "UNKNOWN";
+                if (room != null) {
+                    System.out.println("[" + room + "][" + sender + "]: " + msg.getContent());
+                } else {
+                    System.out.println("[" + sender + "]: " + msg.getContent());
+                }
+                break;
+            case PRIVATE_MESSAGE:
+                String from = msg.getSender() != null ? msg.getSender() : "UNKNOWN";
+                System.out.println("[PM from " + from + "]: " + msg.getContent());
                 break;
             case ERROR_RESPONSE:
                 System.out.println("[ERROR] " + msg.getContent());
